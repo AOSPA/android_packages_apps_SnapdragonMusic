@@ -1786,9 +1786,8 @@ public class MediaPlaybackService extends Service {
             if (!mIsSupposedToBePlaying) {
                 mIsSupposedToBePlaying = true;
                 notifyChange(PLAYSTATE_CHANGED);
-            } else {
-                updatePlaybackState(false);
             }
+
             updateNotification();
 
         } else if (mPlayListLen <= 0) {
@@ -1797,6 +1796,9 @@ public class MediaPlaybackService extends Service {
             // something.
             setShuffleMode(SHUFFLE_AUTO);
         }
+
+        //update the playback status to RCC
+        updatePlaybackState(false);
 
         if (views != null && viewsLarge != null && status != null) {
             // Reset notification play function to pause function
