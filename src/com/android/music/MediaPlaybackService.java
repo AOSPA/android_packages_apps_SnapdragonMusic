@@ -362,8 +362,10 @@ public class MediaPlaybackService extends Service {
                     break;
                 case TRACK_ENDED:
                     if (mRepeatMode == REPEAT_CURRENT) {
-                        seek(0);
-                        play();
+                        if (isPlaying()) {
+                            seek(0);
+                            play();
+                         }
                     } else {
                         gotoNext(false);
                     }
@@ -1751,12 +1753,6 @@ public class MediaPlaybackService extends Service {
      * Starts playback of a previously opened file.
      */
     public void play() {
-
-        if (MusicUtils.isTelephonyCallInProgress(this)) {
-            Log.d(LOGTAG, "CS/CSVT Call is in progress, can't play music");
-            return;
-        }
-
         if (mAudioManager == null) {
             mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
             mAudioManager.registerRemoteControlClient(mRemoteControlClient);
@@ -1786,9 +1782,8 @@ public class MediaPlaybackService extends Service {
             if (!mIsSupposedToBePlaying) {
                 mIsSupposedToBePlaying = true;
                 notifyChange(PLAYSTATE_CHANGED);
-            } else {
-                updatePlaybackState(false);
             }
+
             updateNotification();
 
         } else if (mPlayListLen <= 0) {
@@ -1797,6 +1792,9 @@ public class MediaPlaybackService extends Service {
             // something.
             setShuffleMode(SHUFFLE_AUTO);
         }
+
+        //update the playback status to RCC
+        updatePlaybackState(false);
 
         if (views != null && viewsLarge != null && status != null) {
             // Reset notification play function to pause function
@@ -2876,8 +2874,22 @@ public class MediaPlaybackService extends Service {
             case SHUFFLE_NONE:
                 return VALUE_SHUFFLEMODE_OFF;
             case SHUFFLE_NORMAL:
+                /*
+                 * Repeat_current mode cannot support shuttle mode,
+                 * so need sync its setting value to shuttle off.
+                */
+                if (getRepeatMode() == REPEAT_CURRENT) {
+                   return VALUE_SHUFFLEMODE_OFF;
+                }
                 return VALUE_SHUFFLEMODE_ALL;
             case SHUFFLE_AUTO:
+                /*
+                 * Repeat_current mode cannot support shuttle mode,
+                 * so need sync its setting value to shuttle off.
+                */
+                if (getRepeatMode() == REPEAT_CURRENT) {
+                   return VALUE_SHUFFLEMODE_OFF;
+                }
                 return VALUE_SHUFFLEMODE_ALL;
             default:
                 return VALUE_SHUFFLEMODE_OFF;
