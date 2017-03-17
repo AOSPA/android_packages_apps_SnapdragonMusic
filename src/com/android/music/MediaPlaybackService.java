@@ -1753,12 +1753,6 @@ public class MediaPlaybackService extends Service {
      * Starts playback of a previously opened file.
      */
     public void play() {
-
-        if (MusicUtils.isTelephonyCallInProgress(this)) {
-            Log.d(LOGTAG, "CS/CSVT Call is in progress, can't play music");
-            return;
-        }
-
         if (mAudioManager == null) {
             mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
             mAudioManager.registerRemoteControlClient(mRemoteControlClient);
@@ -1788,9 +1782,8 @@ public class MediaPlaybackService extends Service {
             if (!mIsSupposedToBePlaying) {
                 mIsSupposedToBePlaying = true;
                 notifyChange(PLAYSTATE_CHANGED);
-            } else {
-                updatePlaybackState(false);
             }
+
             updateNotification();
 
         } else if (mPlayListLen <= 0) {
@@ -1799,6 +1792,9 @@ public class MediaPlaybackService extends Service {
             // something.
             setShuffleMode(SHUFFLE_AUTO);
         }
+
+        //update the playback status to RCC
+        updatePlaybackState(false);
 
         if (views != null && viewsLarge != null && status != null) {
             // Reset notification play function to pause function
@@ -2878,8 +2874,22 @@ public class MediaPlaybackService extends Service {
             case SHUFFLE_NONE:
                 return VALUE_SHUFFLEMODE_OFF;
             case SHUFFLE_NORMAL:
+                /*
+                 * Repeat_current mode cannot support shuttle mode,
+                 * so need sync its setting value to shuttle off.
+                */
+                if (getRepeatMode() == REPEAT_CURRENT) {
+                   return VALUE_SHUFFLEMODE_OFF;
+                }
                 return VALUE_SHUFFLEMODE_ALL;
             case SHUFFLE_AUTO:
+                /*
+                 * Repeat_current mode cannot support shuttle mode,
+                 * so need sync its setting value to shuttle off.
+                */
+                if (getRepeatMode() == REPEAT_CURRENT) {
+                   return VALUE_SHUFFLEMODE_OFF;
+                }
                 return VALUE_SHUFFLEMODE_ALL;
             default:
                 return VALUE_SHUFFLEMODE_OFF;
@@ -3022,10 +3032,13 @@ public class MediaPlaybackService extends Service {
             }
             player.setOnCompletionListener(listener);
             player.setOnErrorListener(errorListener);
-            Intent i = new Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION);
-            i.putExtra(AudioEffect.EXTRA_AUDIO_SESSION, getAudioSessionId());
-            i.putExtra(AudioEffect.EXTRA_PACKAGE_NAME, getPackageName());
-            sendBroadcast(i);
+            int sessionId = getAudioSessionId();
+            if (sessionId >= 0) {
+                Intent i = new Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION);
+                i.putExtra(AudioEffect.EXTRA_AUDIO_SESSION, getAudioSessionId());
+                i.putExtra(AudioEffect.EXTRA_PACKAGE_NAME, getPackageName());
+                sendBroadcast(i);
+            }
             return true;
         }
 
@@ -3210,7 +3223,12 @@ public class MediaPlaybackService extends Service {
         }
 
         public int getAudioSessionId() {
-            return mCurrentMediaPlayer.getAudioSessionId();
+            try {
+                return mCurrentMediaPlayer.getAudioSessionId();
+            } catch (Exception e) {
+                Log.d(LOGTAG, "getAudioSessionId failed: " + e);
+                return -1;
+            }
         }
     }
 
