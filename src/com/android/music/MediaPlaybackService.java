@@ -3034,6 +3034,8 @@ public class MediaPlaybackService extends Service {
                 return false;
             } catch (IllegalStateException ex) {
                 return false;
+            } catch (RuntimeException ex) {
+                return false;
             }
             player.setOnCompletionListener(listener);
             player.setOnErrorListener(errorListener);
