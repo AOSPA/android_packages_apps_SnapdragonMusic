@@ -362,8 +362,10 @@ public class MediaPlaybackService extends Service {
                     break;
                 case TRACK_ENDED:
                     if (mRepeatMode == REPEAT_CURRENT) {
-                        seek(0);
-                        play();
+                        if (isPlaying()) {
+                            seek(0);
+                            play();
+                         }
                     } else {
                         gotoNext(false);
                     }
@@ -385,10 +387,8 @@ public class MediaPlaybackService extends Service {
                             pause(false);
                             break;
                         case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                            if(isPlaying()) {
-                                mPausedByTransientLossOfFocus = true;
-                            }
-                            pause();
+                            mMediaplayerHandler.removeMessages(FADEUP);
+                            mMediaplayerHandler.sendEmptyMessage(FADEDOWN);
                             break;
                         case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                             Log.v(LOGTAG, "AudioFocus: received AUDIOFOCUS_LOSS_TRANSIENT");
@@ -970,6 +970,11 @@ public class MediaPlaybackService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (!mIsReadGranted) {
+            Toast.makeText(getApplicationContext(),
+                    R.string.dialog_content, Toast.LENGTH_LONG).show();
+            return START_STICKY;
+        }
         mServiceStartId = startId;
         mDelayedStopHandler.removeCallbacksAndMessages(null);
 
@@ -1301,11 +1306,7 @@ public class MediaPlaybackService extends Service {
         sendStickyBroadcast(i);
 
         if (what.equals(PLAYSTATE_CHANGED)) {
-            long pos = (mPlayer != null) ? position() : 0;
-            if (pos < 0) pos = 0;
-            mRemoteControlClient.setPlaybackState((isPlaying() ?
-                    RemoteControlClient.PLAYSTATE_PLAYING : RemoteControlClient.PLAYSTATE_PAUSED),
-                    pos, PLAYBACK_SPEED_1X);
+            updatePlaybackState(false);
         } else if (what.equals(META_CHANGED)) {
             RemoteControlClient.MetadataEditor ed = mRemoteControlClient.editMetadata(true);
             ed.putString(MediaMetadataRetriever.METADATA_KEY_TITLE, getTrackName());
@@ -1582,6 +1583,7 @@ public class MediaPlaybackService extends Service {
             if (mPlayListLen == 0) {
                 return;
             }
+            updatePlaybackState(true);
             stop(false);
 
             mCurrentTrackInfo = getTrackInfoFromId(mPlayList[mPlayPos]);
@@ -1756,20 +1758,14 @@ public class MediaPlaybackService extends Service {
      * Starts playback of a previously opened file.
      */
     public void play() {
-
-        if (MusicUtils.isTelephonyCallInProgress(this)) {
-            Log.d(LOGTAG, "CS/CSVT Call is in progress, can't play music");
-            return;
-        }
-
         if (mAudioManager == null) {
             mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            mAudioManager.registerRemoteControlClient(mRemoteControlClient);
         }
         mAudioManager.requestAudioFocus(mAudioFocusListener, AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN);
         mAudioManager.registerMediaButtonEventReceiver(new ComponentName(this.getPackageName(),
                 MediaButtonIntentReceiver.class.getName()));
-        mAudioManager.registerRemoteControlClient(mRemoteControlClient);
 
         if (mPlayer.isInitialized()) {
             // if we are at the end of the song, playing it again.
@@ -1792,6 +1788,7 @@ public class MediaPlaybackService extends Service {
                 mIsSupposedToBePlaying = true;
                 notifyChange(PLAYSTATE_CHANGED);
             }
+
             updateNotification();
 
         } else if (mPlayListLen <= 0) {
@@ -1800,6 +1797,9 @@ public class MediaPlaybackService extends Service {
             // something.
             setShuffleMode(SHUFFLE_AUTO);
         }
+
+        //update the playback status to RCC
+        updatePlaybackState(false);
 
         if (views != null && viewsLarge != null && status != null) {
             // Reset notification play function to pause function
@@ -2879,8 +2879,22 @@ public class MediaPlaybackService extends Service {
             case SHUFFLE_NONE:
                 return VALUE_SHUFFLEMODE_OFF;
             case SHUFFLE_NORMAL:
+                /*
+                 * Repeat_current mode cannot support shuttle mode,
+                 * so need sync its setting value to shuttle off.
+                */
+                if (getRepeatMode() == REPEAT_CURRENT) {
+                   return VALUE_SHUFFLEMODE_OFF;
+                }
                 return VALUE_SHUFFLEMODE_ALL;
             case SHUFFLE_AUTO:
+                /*
+                 * Repeat_current mode cannot support shuttle mode,
+                 * so need sync its setting value to shuttle off.
+                */
+                if (getRepeatMode() == REPEAT_CURRENT) {
+                   return VALUE_SHUFFLEMODE_OFF;
+                }
                 return VALUE_SHUFFLEMODE_ALL;
             default:
                 return VALUE_SHUFFLEMODE_OFF;
@@ -2955,7 +2969,6 @@ public class MediaPlaybackService extends Service {
         private Runnable mSetNextMediaPlayerRunnable = null;
         private boolean mIsInitialized = false;
         private boolean mIsComplete = false;
-        private boolean mIsNextPrepared = false;
 
         public MultiPlayer() {
             mCurrentMediaPlayer.setWakeMode(MediaPlaybackService.this, PowerManager.PARTIAL_WAKE_LOCK);
@@ -2975,7 +2988,26 @@ public class MediaPlaybackService extends Service {
             @Override
             public void onPrepared(MediaPlayer mp){
                 Log.d(LOGTAG, "next MediaPlayer Prepared");
-                mIsNextPrepared = true;
+
+                if (mp != null && mp == mCurrentMediaPlayer) {
+                    Log.d(LOGTAG, "Ignore to set next MediaPlayer as self");
+                    return;
+                }
+
+                if (mCurrentMediaPlayer != mp
+                        && mIsSupposedToBePlaying
+                        && mCurrentMediaPlayer != null
+                        && mIsInitialized
+                        && mCurrentMediaPlayer.isPlaying()) {
+                    Log.d(LOGTAG, "setNextMediaPlayer");
+                    mCurrentMediaPlayer.setNextMediaPlayer(mp);
+                    if (mNextMediaPlayer != null) {
+                        mNextMediaPlayer.release();
+                    }
+                    mNextMediaPlayer = (CompatMediaPlayer)mp;
+                } else {
+                    mp.release();
+                }
             }
         };
 
@@ -3005,10 +3037,13 @@ public class MediaPlaybackService extends Service {
             }
             player.setOnCompletionListener(listener);
             player.setOnErrorListener(errorListener);
-            Intent i = new Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION);
-            i.putExtra(AudioEffect.EXTRA_AUDIO_SESSION, getAudioSessionId());
-            i.putExtra(AudioEffect.EXTRA_PACKAGE_NAME, getPackageName());
-            sendBroadcast(i);
+            int sessionId = getAudioSessionId();
+            if (sessionId >= 0) {
+                Intent i = new Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION);
+                i.putExtra(AudioEffect.EXTRA_AUDIO_SESSION, getAudioSessionId());
+                i.putExtra(AudioEffect.EXTRA_PACKAGE_NAME, getPackageName());
+                sendBroadcast(i);
+            }
             return true;
         }
 
@@ -3029,40 +3064,31 @@ public class MediaPlaybackService extends Service {
             mp.setWakeMode(MediaPlaybackService.this, PowerManager.PARTIAL_WAKE_LOCK);
             mp.setAudioSessionId(getAudioSessionId());
             if (mSetNextMediaPlayerHandler == null) {
-               mSetNextMediaPlayerHandler = new Handler(mPrepareNextHandlerThread.getLooper());
+                mSetNextMediaPlayerHandler = new Handler(mPrepareNextHandlerThread.getLooper());
+            }
             if (mSetNextMediaPlayerRunnable != null) {
                mSetNextMediaPlayerHandler.removeCallbacks(mSetNextMediaPlayerRunnable);
             }
             mSetNextMediaPlayerRunnable = new Runnable() {
-                    @Override
-                    public void run() {
-                        setDataSourceImpl(mp, path, true);
-                        if (mIsSupposedToBePlaying
-                            && mCurrentMediaPlayer != null
-                            && mIsInitialized && mIsNextPrepared
-                            && mCurrentMediaPlayer.isPlaying()) {
-                            mCurrentMediaPlayer.setNextMediaPlayer(mp);
-                            if (mNextMediaPlayer != null) {
-                                mNextMediaPlayer.release();
-                            }
-                            mNextMediaPlayer = mp;
-                        } else {
-                            mp.release();
-                        }
-                        mIsNextPrepared = false;
+                @Override
+                public void run() {
+                    if (!setDataSourceImpl(mp, path, true)) {
+                        // failed to open next, we'll transition the old fashioned way,
+                        // which will skip over the faulty file
+                        releaseCurrentAndNext(mp);
                     }
-                };
-               mSetNextMediaPlayerHandler.post(mSetNextMediaPlayerRunnable);
-            } else {
-                // failed to open next, we'll transition the old fashioned way,
-                // which will skip over the faulty file
-                if (mp != null) {
-                    mp.release();
                 }
-                if (mNextMediaPlayer != null) {
-                    mNextMediaPlayer.release();
-                    mNextMediaPlayer = null;
-                }
+            };
+            mSetNextMediaPlayerHandler.post(mSetNextMediaPlayerRunnable);
+        }
+
+        private void releaseCurrentAndNext(MediaPlayer current) {
+            if (current != null) {
+                current.release();
+            }
+            if (mNextMediaPlayer != null) {
+                mNextMediaPlayer.release();
+                mNextMediaPlayer = null;
             }
         }
 
@@ -3104,6 +3130,7 @@ public class MediaPlaybackService extends Service {
         MediaPlayer.OnCompletionListener listener = new MediaPlayer.OnCompletionListener() {
             public void onCompletion(MediaPlayer mp) {
                 mIsComplete = true;
+                updatePlaybackState(false);
                 if (mp == mCurrentMediaPlayer && mNextMediaPlayer != null) {
                     if (mPlayPos == mNextPlayPos) {
                         mCurrentTrackInfo = getTrackInfoFromId(mPlayList[mNextPlayPos]);
@@ -3189,7 +3216,11 @@ public class MediaPlaybackService extends Service {
         }
 
         public void setVolume(float vol) {
-            mCurrentMediaPlayer.setVolume(vol, vol);
+            try {
+                mCurrentMediaPlayer.setVolume(vol, vol);
+            } catch (Exception e) {
+                Log.d(LOGTAG, "setVolume failed: " + e);
+            }
         }
 
         public void setAudioSessionId(int sessionId) {
@@ -3197,7 +3228,12 @@ public class MediaPlaybackService extends Service {
         }
 
         public int getAudioSessionId() {
-            return mCurrentMediaPlayer.getAudioSessionId();
+            try {
+                return mCurrentMediaPlayer.getAudioSessionId();
+            } catch (Exception e) {
+                Log.d(LOGTAG, "getAudioSessionId failed: " + e);
+                return -1;
+            }
         }
     }
 
@@ -3381,4 +3417,19 @@ public class MediaPlaybackService extends Service {
     }
 
     private final IBinder mBinder = new ServiceStub(this);
+
+    private void updatePlaybackState(boolean pause) {
+        long pos = (mPlayer != null) ? position() : 0;
+        if (pos < 0) pos = 0;
+
+        int state = RemoteControlClient.PLAYSTATE_PAUSED;
+        if (pause) {
+            state = RemoteControlClient.PLAYSTATE_PAUSED;
+        } else {
+            state = isPlaying() ?
+                    RemoteControlClient.PLAYSTATE_PLAYING :
+                    RemoteControlClient.PLAYSTATE_PAUSED;
+        }
+        mRemoteControlClient.setPlaybackState(state, pos, PLAYBACK_SPEED_1X);
+    }
 }
